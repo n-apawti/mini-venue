@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.compiler.name }} / ${{ matrix.preset }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler:
+          - { name: gcc, cc: gcc-14, cxx: g++-14 }
+          - { name: clang, cc: clang-18, cxx: clang++-18 }
+        preset: [debug, asan, tsan, release]
+    env:
+      CC: ${{ matrix.compiler.cc }}
+      CXX: ${{ matrix.compiler.cxx }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build g++-14 clang-18
+
+      # Newer runner kernels use more ASLR bits than older TSan/ASan runtimes support,
+      # which crashes them at startup ("unexpected memory mapping").
+      - name: Reduce ASLR entropy for sanitizers
+        if: matrix.preset == 'asan' || matrix.preset == 'tsan'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - name: Cache fetched dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/${{ matrix.preset }}/_deps/*-subbuild
+          key: deps-${{ matrix.compiler.name }}-${{ matrix.preset }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }} -DVENUE_WARNINGS_AS_ERRORS=ON
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+
+      # Shared CI runners are noisy, so this only checks that benchmarks run.
+      # Real numbers come from your own pinned machine.
+      - name: Benchmark smoke run
+        if: matrix.preset == 'release'
+        run: ./build/release/bench/venue_bench --benchmark_min_time=0.01s
